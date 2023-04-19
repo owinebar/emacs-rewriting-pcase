@@ -1,10 +1,13 @@
-;;; rewriting-pcase-rewrite-sexprs.el --- routines for rewriting sexps in source code   -*- lexical-binding: t; -*-
+;;; rewriting-pcase.el --- Support for rewriting sexps in source code   -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2023  Onnie Winebarger
 
 ;; Author: Onnie Winebarger
 ;; Copyright (C) 2023 by Onnie Lynn Winebarger <owinebar@gmail.com>
 ;; Keywords: extensions, lisp
+;; Version: 0.1
+;; Package-Requires: ((emacs "27.1"))
+;; URL: https://github.com/owinebar/emacs-rewriting-pcase
 
 ;; This program is free software; you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
@@ -57,9 +60,11 @@ Subject to lower bound of MIN-START."
 ;; assumes parse-sexp-ignore-comments is t
 (defun rewriting-pcase--back-sexpr (v p0 &optional p2)
   "Go back one sexpr corresponding to V.
-P0 is the end of the previous sexpr.
-P2 is a position either at the end of the current sexpr on inside it.\
-  Default value is point."
+Arguments:
+  V - a value produced using `read' on the region between p0 and p2
+  P0 is the end of the previous sexpr.
+  P2 is a position either at the end of the current sexpr on inside it.
+     Default value is point."
   (unless p2
     (setq p2 (point)))
   (let (p1)
@@ -74,7 +79,7 @@ P2 is a position either at the end of the current sexpr on inside it.\
 	(when p1
 	  ;; this is only valid if it occured as a named unicode character
 	  (setq p1 nil)
-	  (and (looking-back "\\?\\\\N")
+	  (and (looking-back "\\?\\\\N" p0)
 	       (forward-char -3)
 	       (setq p1 (point))))))
     ;; (forward-sexp -1) also does not deal well with ## (the empty symbol)
@@ -99,11 +104,12 @@ P2 is a position either at the end of the current sexpr on inside it.\
     p1))
        
 (defun rewriting-pcase--replace-text-in-region (start end new)
-  "Replace text in region bounded by START and END with read \
-syntax representing Lisp object NEW.
-If point is inside the region, it will be at the end of the region \
-following the replacement"
-  (if (and (< (point) end) (> (point start)))
+  "Replace text in region using value NEW.
+Arguments:
+  START start of region to replace
+  END end of region to replace
+  NEW Lisp value to write into the region."
+  (if (and (< (point) end) (> (point) start))
       (goto-char end))
   (save-excursion
     (goto-char end)
@@ -113,8 +119,8 @@ following the replacement"
 ;; assumes preceding character is \#
 (defun rewriting-pcase--check-invalid-read-graph-occurence (pos0)
   "Check if reader failed due to encountering bare #N# at postion POS0."
-  (let ((p2 (point))
-	p0 p1 N retval)
+  (let ((N nil)
+	p0 p1 retval)
     (save-excursion
       (forward-char -1)
       (setq p1 (point))
@@ -122,7 +128,7 @@ following the replacement"
       (when (< (point) p1)
 	(setq p0 (point))
 	(forward-char 1)
-	(ignore-error
+	(ignore-error error
 	    (setq N (read (current-buffer))))
 	(when (and N (natnump N) (>= (point) p1))
 	  (setq retval p0))))
@@ -130,8 +136,9 @@ following the replacement"
 
 ;; assumes preceding character is either \) or \]
 (defun rewriting-pcase--check-invalid-non-atomic (pos0)
-  "Check if reader failed due to encountering a non-atomic \
-sexpr containing a #N# at position POS0."
+  "Check reader failure on `#N#' syntax.
+Arguments:
+  POS0 - position at which failed `read' operation was called."
   (let ((p2 (point))
 	(close (preceding-char))
 	open p1)
@@ -151,10 +158,7 @@ sexpr containing a #N# at position POS0."
       p1)))
 
 (defun rewriting-pcase--check-invalid-read (pos0)
-  "Check for whether an invalid-read-syntax \
-error corresponded to a subexpression at POS0 that should produce an \
-object, and dispatching accordingly, or something like `.' that is \
-purely syntactic."
+  "Check for different causes of invalid read error at POS0."
   (let (p1)
     (cond
      ((eq (preceding-char) ?\#) ; check for #N#
@@ -177,8 +181,10 @@ purely syntactic."
 ;; this handles situations where the reader returns a list but
 ;; the character at point is not a left parenthesis
 (defun rewriting-pcase--read-syntax-end (pos1 sym)
-  "Find the position at the start of the sexp following the \
-special read syntax for SYM with a lower bound of POS1."
+  "Find the starting position of the textual sexp preceded by special syntax.
+Arguments:
+  POS1 - location `backward-sexp' indicates is the start of the sexp just read
+  SYM - a symbol that may be represented using special reader syntax."
   (let ((s (rewriting-pcase--symbol-read-syntax sym))
 	p)
     (when s
@@ -243,8 +249,8 @@ special read syntax for SYM with a lower bound of POS1."
 ;;          *** Should be fixed
 (defun rewriting-pcase--pcase-replace-next-sexpr (sexpr-pred)
   "Replace the next sexpr when `(SEXPR-PRED sexp)' produces a non-nil value.
-SEXPR-PRED must return a singleton list.  The text corresponding to \
-the next sexp will be replaced with text for which the reader will \
+SEXPR-PRED must return a singleton list.  The text corresponding to
+the next sexp will be replaced with text for which the reader will
 construct an object equal to the element of the list."
   (let ((pos0 (point))
 	(read-attempts 0)
@@ -299,9 +305,11 @@ construct an object equal to the element of the list."
     (not eof)))
 
 (defun rewriting-pcase--pcase-replace-in-seq (sexpr-pred i n)
-  "Replace sexprs in a sequence of N textual representations where point \
-precedes the I'th object of the sequence.  Matching is performed by \
-SEXPR-PRED as described for `rewriting-pcase--pcase-replace-next-sexpr'."
+  "Replace sexprs in a sequence.
+Arguments:
+  SEXPR-PRED - rewriting predicate
+  I - index of current sexp in sequence
+  N - total number of elements in sequence produced by reader"
   (while (< i n)
     (rewriting-pcase--pcase-replace-next-sexpr sexpr-pred)
     (cl-incf i)))
@@ -311,8 +319,9 @@ SEXPR-PRED as described for `rewriting-pcase--pcase-replace-next-sexpr'."
 ;; Replacement should not disturb relative position of the text surrounding the text
 ;; that produced the sexpr matching the supplied pcase pattern
 (defun rewriting-pcase--pcase-replace-sexpr (sexpr-pred)
-  "Search and replace textual sexprs in current buffer using \
-SEXPR-PRED as described for `rewriting-pcase--pcase-replace-next-sexpr'."
+  "Search and replace textual sexprs in current buffer.
+Arguments:
+  SEXPR-PRED - rewriting predicate"
   (emacs-lisp-mode)
   (let ((parse-sexp-ignore-comments t))
     (save-excursion
@@ -320,12 +329,11 @@ SEXPR-PRED as described for `rewriting-pcase--pcase-replace-next-sexpr'."
       (while (rewriting-pcase--pcase-replace-next-sexpr sexpr-pred)))))
 
 
-(provide 'rewriting-pcase-rewrite-sexprs)
+(provide 'rewriting-pcase)
 
-;;; rewriting-pcase-rewrite-sexprs.el ends here
+;;; rewriting-pcase.el ends here
 
 ;; Local Variables:
 ;; read-symbol-shorthands: (("rp-" . "rewriting-pcase-"))
 ;; End:
 ;; 
-
